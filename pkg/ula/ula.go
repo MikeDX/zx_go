@@ -2117,6 +2117,11 @@ func (u *ULA) applyNextCompositor() {
 		// every Next program including the overwhelming majority that never
 		// enable the Copper at all.
 		if u.nextCopper != nil && !u.nextCopper.Idle() {
+			// Copper WAIT lines are paper lines when NR$64 is at its reset
+			// of 0. Line 0 is the first ULA paper line, 32 lines below the
+			// top of the tilemap and Layer 2 frame, and this loop's y is
+			// that line. An offset in NR$64 would be added to y; nothing
+			// here adds the 32-line frame bias on top of that.
 			// Compose the row once from the state it starts in, then re-compose
 			// its tail from every pixel a Copper write lands in. Each
 			// re-compose overwrites only [p, w), so pixels generated earlier
@@ -2158,9 +2163,10 @@ func (u *ULA) applyNextCompositor() {
 
 	// The rest of the frame is copper time too. cvc is loaded at the first
 	// active line and then counts EVERY line to c_max_vc
-	// (video/zxula_timing.vhd:455-466), so display row y is cvc y and the lines
-	// below the last displayed one are as real to the Copper as the displayed
-	// ones. Nothing gates it on active video on the way: the entity has no
+	// (video/zxula_timing.vhd:455-466), so paper row y is copper line y and
+	// the lines below the last paper row continue that count (192, 193, ...).
+	// Line 0 stays the first paper line. Nothing gates it on active video on
+	// the way: the entity has no
 	// display or blanking input at all (device/copper.vhd:28-42), its process is
 	// a plain rising_edge(clock_i) with no clock enable (device/copper.vhd:53-57),
 	// clock_i is the free-running i_CLK_28 (zxnext.vhd:43,3944), and the only
