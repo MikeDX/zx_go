@@ -799,6 +799,194 @@ func TestComposeScanlineRangeWithNoLayersLeavesTheHeadAlone(t *testing.T) {
 	}
 }
 
+// TestPaperTilemapRowIsTheImageRow pins that paper composition fetches the
+// tilemap at the image row (paper + 24), the same row the border pass uses.
+//
+// The tilemap origin is the top of the 320x240 image. Paper row L is image
+// row L+24, so it shows the tile parked there and not the tile on row L
+// (the tilemap top) or row L+32 (the 256-line sprite frame). The border
+// pass at image row L+24 shows that same tile. Both ComposeScanline and
+// ComposeScanlineRange go through this fetch.
+func TestPaperTilemapRowIsTheImageRow(t *testing.T) {
+	br := &fakeBankReader{}
+	bank := make([]byte, 16384)
+	// For paper row L the three candidate tilemap rows are L (red),
+	// L+24 (green, the image row) and L+32 (blue, the sprite frame row).
+	for x := 0; x < 40; x++ {
+		bank[0*40+x] = 0x01 // row 0, paper 0's too-early row
+		bank[2*40+x] = 0x01 // row 16
+		bank[3*40+x] = 0x02 // row 24
+		bank[4*40+x] = 0x03 // row 32
+		bank[5*40+x] = 0x02 // row 40
+		bank[6*40+x] = 0x03 // row 48
+	}
+	for col := 0; col < 4; col++ {
+		bank[0x500+1*32+col] = 0x11
+		bank[0x500+2*32+col] = 0x22
+		bank[0x500+3*32+col] = 0x33
+	}
+	br.banks[5] = bank
+
+	tm := tilemap.New(br)
+	tm.SetEnabled(true)
+	tm.SetTileMapBase(0x00)
+	tm.SetTilesBase(0x05)
+	tm.SetControl(0x21) // strip flags + on top
+
+	pal := palette.NewBank()
+	pal.Select(palette.PaletteTilemapFirst)
+	pal.Active().Set(0x01, 0b1_1100_0000) // red
+	pal.Active().Set(0x02, 0b0_0011_1000) // green
+	pal.Active().Set(0x03, 0b0_0000_0111) // blue
+	pal.Select(0)
+
+	c := New(pal, nil)
+	c.SetTilemap(tm)
+	ula := make([]byte, Width*4)
+
+	isRed := func(dst []byte, x int) bool {
+		return dst[x*4] != 0 && dst[x*4+1] == 0 && dst[x*4+2] == 0
+	}
+	isGreen := func(dst []byte, x int) bool {
+		return dst[x*4] == 0 && dst[x*4+1] != 0 && dst[x*4+2] == 0
+	}
+	isBlue := func(dst []byte, x int) bool {
+		return dst[x*4] == 0 && dst[x*4+1] == 0 && dst[x*4+2] != 0
+	}
+
+	for _, line := range []int{0, 16} {
+		image := line + TilemapImageYTop
+		paper := make([]byte, Width*4)
+		c.ComposeScanline(line, ula, paper)
+		if !isGreen(paper, 0) {
+			t.Errorf("paper row %d pixel 0: rgb=%d/%d/%d, want green (tilemap row %d)",
+				line, paper[0], paper[1], paper[2], image)
+		}
+		if isRed(paper, 0) {
+			t.Errorf("paper row %d showed tilemap row %d (red)", line, line)
+		}
+		if isBlue(paper, 0) {
+			t.Errorf("paper row %d showed tilemap row %d (blue, the sprite frame row)", line, line+SpriteFrameYTop)
+		}
+
+		ranged := make([]byte, Width*4)
+		c.ComposeScanlineRange(line, ula, ranged, 0, Width)
+		if !isGreen(ranged, 0) {
+			t.Errorf("ranged paper row %d: rgb=%d/%d/%d, want green", line, ranged[0], ranged[1], ranged[2])
+		}
+
+		border := make([]byte, FullWidth*4)
+		c.ComposeBorderRow(image, border, func(int) bool { return true })
+		if !isGreen(border, BorderOffsetX) {
+			t.Errorf("border image row %d at x=%d: rgb=%d/%d/%d, want green, same tile as the paper",
+				image, BorderOffsetX, border[BorderOffsetX*4], border[BorderOffsetX*4+1], border[BorderOffsetX*4+2])
+		}
+
+		frame := make([]byte, FullWidth*4)
+		c.ComposeBorderRow(line+SpriteFrameYTop, frame, func(int) bool { return true })
+		if !isBlue(frame, 0) {
+			t.Errorf("image row %d: rgb=%d/%d/%d, want blue (sprite frame row, not the paper fetch)",
+				line+SpriteFrameYTop, frame[0], frame[1], frame[2])
+		}
+	}
+}
+
+// TestComposeBorderRowHonoursScrollClipAndTransparency pins the border
+// pass to the same tilemap rules as the paper.
+//
+// The X scroll (NR$2F/$30) selects the source column. The clip window
+// (NR$1B) produces no pixel, and that absent pixel must not be painted
+// as palette index 0. The NR$4C nibble is transparent. A real index-0
+// pixel, whose nibble is not NR$4C, still paints.
+func TestComposeBorderRowHonoursScrollClipAndTransparency(t *testing.T) {
+	br := &fakeBankReader{}
+	bank := make([]byte, 16384)
+	bank[0] = 0x01
+	bank[1] = 0x02
+	for col := 0; col < 4; col++ {
+		bank[0x500+1*32+col] = 0x11
+		bank[0x500+2*32+col] = 0x22
+	}
+	br.banks[5] = bank
+
+	tm := tilemap.New(br)
+	tm.SetEnabled(true)
+	tm.SetTileMapBase(0x00)
+	tm.SetTilesBase(0x05)
+	tm.SetControl(0x21) // strip flags + on top
+
+	pal := palette.NewBank()
+	pal.Select(palette.PaletteTilemapFirst)
+	pal.Active().Set(0x00, 0b1_1100_0000) // index 0 = red, so a bogus paint is visible
+	pal.Active().Set(0x01, 0b1_1100_0000) // red
+	pal.Active().Set(0x02, 0b0_0011_1000) // green
+	pal.Select(0)
+
+	c := New(pal, nil)
+	c.SetTilemap(tm)
+	allBorder := func(int) bool { return true }
+
+	paint := func() []byte {
+		dst := make([]byte, FullWidth*4)
+		for x := 0; x < FullWidth; x++ {
+			dst[x*4+0], dst[x*4+1], dst[x*4+2], dst[x*4+3] = 0x00, 0x00, 0x11, 0xFF
+		}
+		c.ComposeBorderRow(0, dst, allBorder)
+		return dst
+	}
+	isRed := func(dst []byte, x int) bool {
+		return dst[x*4] != 0 && dst[x*4+1] == 0 && dst[x*4+2] == 0
+	}
+	isGreen := func(dst []byte, x int) bool {
+		return dst[x*4] == 0 && dst[x*4+1] != 0 && dst[x*4+2] == 0
+	}
+	untouched := func(dst []byte, x int) bool {
+		return dst[x*4] == 0 && dst[x*4+1] == 0 && dst[x*4+2] == 0x11
+	}
+
+	dst := paint()
+	if !isRed(dst, 0) {
+		t.Errorf("scroll 0, x=0: rgb=%d/%d/%d, want red (tile 1)", dst[0], dst[1], dst[2])
+	}
+	tm.SetScrollX(8)
+	dst = paint()
+	if !isGreen(dst, 0) {
+		t.Errorf("scroll 8, x=0: rgb=%d/%d/%d, want green (tile 2, this line's X scroll)", dst[0], dst[1], dst[2])
+	}
+	tm.SetScrollX(0)
+
+	// Clip rejects x=0 (clip starts at pixel 16). No pixel there, so the
+	// border colour stays. x=16 is inside the window and paints.
+	tm.SetClip(8, 0x9F, 0, 0xFF)
+	dst = paint()
+	if !untouched(dst, 0) {
+		t.Errorf("clipped x=0 was painted rgb=%d/%d/%d; an absent pixel must not become palette[0]",
+			dst[0], dst[1], dst[2])
+	}
+	if !isRed(dst, 16) {
+		t.Errorf("inside clip x=16: rgb=%d/%d/%d, want red", dst[16*4], dst[16*4+1], dst[16*4+2])
+	}
+	tm.SetClip(0, 0x9F, 0, 0xFF)
+
+	c.SetTilemapTransparency(0x01)
+	dst = paint()
+	if !untouched(dst, 0) {
+		t.Errorf("NR$4C=1: x=0 rgb=%d/%d/%d, want the border colour (nibble 1 is transparent)",
+			dst[0], dst[1], dst[2])
+	}
+	c.SetTilemapTransparency(0x0F)
+
+	// A real index-0 pixel (nibble 0, NR$4C still $F) is opaque.
+	for col := 0; col < 4; col++ {
+		bank[0x500+1*32+col] = 0x00
+	}
+	dst = paint()
+	if !isRed(dst, 0) {
+		t.Errorf("real index 0: rgb=%d/%d/%d, want red (palette[0]); only an absent pixel stays unpainted",
+			dst[0], dst[1], dst[2])
+	}
+}
+
 // And the bounded copy still has to handle the whole-row case identically, so
 // the ordinary full-width call is unaffected.
 func TestComposeScanlineRangeWithNoLayersPaintsAFullRow(t *testing.T) {

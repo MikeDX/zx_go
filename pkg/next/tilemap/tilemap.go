@@ -212,6 +212,17 @@ func (t *Tilemap) RenderScanlineFlags(y int, dst, en, below []byte) {
 
 	mapOffsetBase := int(t.mapBase&0x3F) << 8
 	tilesOffsetBase := int(t.tilesBase&0x3F) << 8
+	// Bank 7 is 8 KB in the tilemap address space, so map and tile
+	// addresses wrap at 0x1FFF. Bank 5 is the full 16 KB page and
+	// wraps at 0x3FFF.
+	mapMask := 0x3FFF
+	if mapBank == 7 {
+		mapMask = 0x1FFF
+	}
+	tilesMask := 0x3FFF
+	if tilesBank == 7 {
+		tilesMask = 0x1FFF
+	}
 
 	// 40-col mode: 1 byte per tile (strip_flags=1) or 2 bytes
 	// (strip_flags=0, tile + flag pair). Sprint N supports both —
@@ -257,13 +268,12 @@ func (t *Tilemap) RenderScanlineFlags(y int, dst, en, below []byte) {
 		}
 		absX := x + t.scrollX
 		tileX := (absX / TileWidth) % tilesPerRow
-		mapEntry := mapOffsetBase + (tileY*tilesPerRow+tileX)*bytesPerTile
-		mapEntry &= 0x3FFF
+		mapEntry := (mapOffsetBase + (tileY*tilesPerRow+tileX)*bytesPerTile) & mapMask
 		// Per-tile attribute, or the global default_attr when
 		// strip_flags eliminates the attribute byte.
 		attr := t.defaultAttr
 		if !stripFlags {
-			attr = mapBuf[(mapEntry+1)&0x3FFF]
+			attr = mapBuf[(mapEntry+1)&mapMask]
 		}
 		tileIdx := int(mapBuf[mapEntry])
 		if mode512 {
@@ -277,7 +287,7 @@ func (t *Tilemap) RenderScanlineFlags(y int, dst, en, below []byte) {
 			// as attr(7:1) & tile_bit — "extend palette offset to 7
 			// bits" — i.e. (attr & 0xFE) | bit. Index 0 stays the
 			// transparent slot so the compositor falls through to ULA.
-			defAddr := (tilesOffsetBase + int(tileIdx)*8 + pixelRow) & 0x3FFF
+			defAddr := (tilesOffsetBase + int(tileIdx)*8 + pixelRow) & tilesMask
 			bit := (tilesBuf[defAddr] >> (7 - uint(pixelInTile))) & 1
 			dst[x] = (attr & 0xFE) | bit
 			if x < len(en) {
@@ -309,8 +319,8 @@ func (t *Tilemap) RenderScanlineFlags(y int, dst, en, below []byte) {
 		// bytes); attr bits 7:4 are the palette offset, the pixel is a
 		// nibble. ty selects the 4-byte row, tx the pixel within it.
 		paletteOffset := (attr >> 4) & 0x0F
-		tileDataBase := (tilesOffsetBase + int(tileIdx)*32 + ty*4) & 0x3FFF
-		b := tilesBuf[tileDataBase+tx/2]
+		tileDataBase := (tilesOffsetBase + int(tileIdx)*32 + ty*4) & tilesMask
+		b := tilesBuf[(tileDataBase+tx/2)&tilesMask]
 		var nibble byte
 		if tx&1 == 0 {
 			nibble = (b >> 4) & 0x0F

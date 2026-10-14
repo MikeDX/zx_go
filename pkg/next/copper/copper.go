@@ -158,7 +158,19 @@ type Copper struct {
 	// row's composition at the pixel a MOVE actually wrote in, rather than
 	// assuming the write landed at a segment boundary.
 	wrote bool
+	// waitLineBias is added to a WAIT instruction's Y before the equality
+	// against scanline. It stays 0 for the device, whose compare is
+	// vcount == Y (device/copper.vhd:94). The ULA display path sets it to 8
+	// so WAIT line L releases 8 lines later than the paper line the render
+	// loop passes as scanline. The bias is not applied to lastScanline, so
+	// a StartOnVBL restart still sees the frame wrap on the scanline argument.
+	waitLineBias uint16
 }
+
+// SetWaitLineBias delays a WAIT's vertical match by lines. The scanline
+// argument of Step is unchanged, including the value remembered for the
+// StartOnVBL restart. Zero is the device compare.
+func (c *Copper) SetWaitLineBias(lines uint16) { c.waitLineBias = lines }
 
 // New returns an empty copper.
 func New() *Copper { return &Copper{stopped: true} }
@@ -424,7 +436,11 @@ func (c *Copper) Step(scanline uint16, hcount uint16, maxClocks int) int {
 			// fallback used to cover a caller that skipped lines, but the render
 			// loop presents every line and every column, so all it did was run
 			// a list's later WAITs a frame early.
-			if scanline == inst.Y && hcount >= WaitHThreshold(inst.X) {
+			// waitLineBias shifts only this compare. A display path sets it
+			// so WAIT line L releases on scanline L+bias. Callers that pass
+			// the device's vcount leave it at 0, and the equality stays
+			// vcount == Y.
+			if scanline == inst.Y+c.waitLineBias && hcount >= WaitHThreshold(inst.X) {
 				c.pc++
 				spent++
 				continue

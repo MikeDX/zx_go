@@ -57,7 +57,16 @@ func TestCopperListLandsItsWritesWhereTheRasterIs(t *testing.T) {
 
 	u.applyNextCompositor()
 
-	row := u.img.Pix[BorderTop*u.img.Stride+BorderLeft*4:]
+	// WAIT Y=0 names the first paper line and releases 8 lines later.
+	// The horizontal landing below is measured on that release row.
+	early := u.img.Pix[BorderTop*u.img.Stride+BorderLeft*4:]
+	for x := 0; x < ScreenWidth; x++ {
+		if got := int(early[x*4]); got != 0 {
+			t.Fatalf("paper row 0 pixel %d shows %d copper writes, want 0: WAIT Y=0 has not released yet", x, got)
+		}
+	}
+	const releaseRow = 8
+	row := u.img.Pix[(BorderTop+releaseRow)*u.img.Stride+BorderLeft*4:]
 	for x := 0; x < ScreenWidth; x++ {
 		want := 0
 		switch {

@@ -33,6 +33,17 @@ const BorderOffsetX = 32
 // when it asks the sprite layer for a paper row.
 const SpriteFrameYTop = 32
 
+// TilemapImageYTop is the tilemap row of the paper's top edge.
+//
+// The tilemap is anchored to the 320x240 image, the same origin the border
+// pass and the wide path already use, and that image has a 24-pixel top
+// border. Paper row N is therefore tilemap row N+TilemapImageYTop. That is
+// the same scanline as sprite frame row N+SpriteFrameYTop: the 8-pixel
+// difference is the crop between the 256-line sprite frame and the 240-line
+// image. Fetching paper row N from tilemap row N left the paper 24 lines
+// above the border columns of that scanline.
+const TilemapImageYTop = 24
+
 // DefaultTransparency is the Next-default 8-bit palette-mapped colour
 // (NextReg 0x14 reset value) used as the global transparency colour for
 // Layer 2 and the sprite layer until a guest writes NextReg 0x14 / 0x4B.
@@ -272,18 +283,25 @@ func (c *Compositor) Layer2Width() int {
 
 // ComposeBorderRow paints tilemap content over the border-area
 // pixels of a full-screen row. Used by ULA.applyNextCompositor
-// AFTER the inner 256-wide pass — covers the left 32-px and right
-// 32-px border, plus the full 320-px width of border rows above
-// and below the classic screen area.
+// on each scanline, so the row is drawn with the X scroll
+// (NR$2F/$30) in force on that line. It covers the left 32-px and
+// right 32-px border, plus the full 320-px width of border rows
+// above and below the classic screen area.
 //
-// `dst` is 320×4 RGBA bytes for row `tilemapY` (relative to tilemap
-// origin = top-left of the full 320×256 Next display).
-// `isInBorderArea(x)` returns true for x values OUTSIDE the central
-// 256-px inner area — those are the pixels the border pass paints;
-// inner pixels are left alone (the inner pass already handled them).
+// `dst` is 320x4 RGBA bytes for image row `tilemapY` (0 = top of the
+// 320x240 image, the tilemap's origin). `isInBorderArea(x)` returns
+// true for x values OUTSIDE the central 256-px inner area. Those are
+// the pixels this pass paints; inner pixels are left alone (the inner
+// pass already handled them).
 //
 // For rows above/below the classic 192-line screen, every x is in
 // the border area; for screen rows, only x < 32 and x >= 32+256.
+//
+// A column is painted only when the tilemap actually produced a pixel
+// there (inside the NR$1B clip window) and the low nibble of its
+// palette index is not the NR$4C transparency nibble. An absent pixel
+// reads back as index 0; painting that would cover the border with
+// palette[0] wherever the clip window rejects the column.
 func (c *Compositor) ComposeBorderRow(tilemapY int, dst []byte, isInBorderArea func(x int) bool) {
 	if !c.HasActiveTilemap() {
 		return
@@ -293,23 +311,27 @@ func (c *Compositor) ComposeBorderRow(tilemapY int, dst []byte, isInBorderArea f
 		return
 	}
 	var scan [FullWidth]byte
-	c.tilemap.RenderScanline(tilemapY, scan[:])
-	// Same on_top rule as the inner pass: when NR$6B bit 0 is set
-	// the FPGA paints palette[0] for nibble-0 pixels rather than
-	// letting the ULA border colour show through. Without this the
-	// outer 32-px border + 32-px top/bottom strips of the testcard
-	// would show through to whatever ULA BorderColour boot.bin
-	// happens to have left (e.g. blue) instead of the tilemap
-	// background black, mismatching the inner screen and producing
-	// a green/blue-banded "frame" effect.
-	onTop := c.tilemap.OnTop()
+	var en [FullWidth]byte
+	var below [FullWidth]byte
+	c.tilemap.RenderScanlineFlags(tilemapY, scan[:], en[:], below[:])
+	tmTransparentNibble := c.tilemapTrans
 	for x := 0; x < FullWidth; x++ {
 		if !isInBorderArea(x) {
 			continue
 		}
+		// pixel_en_s is clear outside the clip window and wherever the
+		// tilemap has no pixel. Index 0 is a real colour when a pixel
+		// is present, so transparency cannot be inferred from scan.
+		if en[x] == 0 {
+			continue
+		}
 		idx := scan[x]
-		if idx == 0 && !onTop {
-			continue // transparent — ULA border shows
+		if idx&0x0F == tmTransparentNibble {
+			continue
+		}
+		// pixel_below_o: the ULA border colour draws over this pixel.
+		if below[x] != 0 {
+			continue
 		}
 		r, g, b := tilemapPal.RGB(idx)
 		off := x * 4
@@ -547,15 +569,15 @@ func (c *Compositor) ComposeScanlineRange(y int, ulaRGBA []byte, dst []byte, x0,
 		if tilemapPal == nil {
 			doTilemap = false
 		} else {
-			// Render the FULL 320-pixel tilemap row. The inner
-			// 256-wide compose pass uses the centred 256 pixels
-			// (cols 32..287 of the tilemap = the cols that overlap
-			// the classic-screen area when tilemap col 0 maps to
-			// image col 0). See sram_pre_layer2_A21_A13 / FPGA
-			// 320-pixel video framing — tilemap is anchored to the
-			// full screen including the 32-px border, not to the
-			// inner 256-wide rectangle.
-			c.tilemap.RenderScanlineFlags(y, c.tilemapScratch[:], c.tilemapEn[:], c.tilemapBelow[:])
+			// Render the FULL 320-pixel tilemap row in image coordinates.
+			// The caller passes the paper row; the tilemap's origin is the
+			// top of the 320x240 image, so the paper starts TilemapImageYTop
+			// rows down. The inner 256-wide compose pass then uses the
+			// centred 256 pixels (cols 32..287, the columns that overlap
+			// the classic screen when tilemap col 0 maps to image col 0).
+			// The border pass asks for the same image row, so the paper and
+			// the border columns of one scanline come from one tilemap row.
+			c.tilemap.RenderScanlineFlags(y+TilemapImageYTop, c.tilemapScratch[:], c.tilemapEn[:], c.tilemapBelow[:])
 			tilemapScan = c.tilemapScratch[BorderOffsetX : BorderOffsetX+Width]
 			tilemapEn = c.tilemapEn[BorderOffsetX : BorderOffsetX+Width]
 			tilemapBelow = c.tilemapBelow[BorderOffsetX : BorderOffsetX+Width]

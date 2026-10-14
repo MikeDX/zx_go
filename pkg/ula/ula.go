@@ -556,11 +556,32 @@ func (u *ULA) SetNextSpritePort(s NextSpritePort) { u.nextSprite = s }
 // $103B / $113B dispatch to it when present.
 func (u *ULA) SetNextI2C(b NextI2C) { u.nextI2C = b }
 
+// copperWaitLineBias is how many lines later than the paper row a WAIT
+// for that row releases. The render loop still passes the paper row as
+// the copper scanline. WAIT line L matches paper row L+copperWaitLineBias,
+// which is tilemap row L+32 while the tilemap picture itself stays at
+// paper row + 24.
+const copperWaitLineBias = 8
+
+// copperWaitLineShifter is implemented by the Next copper. Mocks that
+// only record the scanline they are given do not implement it, so the
+// line number in those traces stays the paper row.
+type copperWaitLineShifter interface {
+	SetWaitLineBias(uint16)
+}
+
 // SetNextCopper installs the Spectrum Next Copper coprocessor.
-// The compositor pass calls Step once per active scanline so MOVEs
-// affecting palette / Layer 2 state are visible to that row's
-// composition. Passing nil unhooks.
-func (u *ULA) SetNextCopper(c NextCopper) { u.nextCopper = c }
+// The compositor pass calls Step once per raster column so MOVEs
+// affecting palette / Layer 2 state are visible from the pixel they
+// write in. A copper that accepts a WAIT line bias is given
+// copperWaitLineBias, so WAIT line L releases on paper row L+8.
+// The scanline passed to Step stays the paper line. Passing nil unhooks.
+func (u *ULA) SetNextCopper(c NextCopper) {
+	u.nextCopper = c
+	if s, ok := c.(copperWaitLineShifter); ok {
+		s.SetWaitLineBias(copperWaitLineBias)
+	}
+}
 
 // SetNextRasterLog installs the mid-frame raster journal. Passing nil (the
 // default, and every classic model) leaves the compositor pass exactly as it
@@ -1334,47 +1355,62 @@ func (u *ULA) renderHiResLayer2() *image.RGBA {
 	return wide
 }
 
-// ActiveVideoLine returns the current raster line within the frame,
-// derived from the CPU's T-state position (T-states since frame start /
-// T-states-per-line). It is a 9-bit counter (0..511). The Spectrum Next
-// exposes this via NextReg $1E (MSB, bit 0) / $1F (LSB): NextZXOS dot
-// commands such as NextGuide DISABLE interrupts and poll it to sync to
-// the raster, so it MUST advance as the CPU runs or the wait hangs.
+// ActiveVideoLine returns the current raster line within the frame, the
+// value NextReg $1E (MSB, bit 0) / $1F (LSB) reads back:
+//
+//	line = T-states since frame start * lines per frame / frame length
+//
+// The frame length is the 3.5 MHz frame times the CPU speed, so the same
+// fraction of the frame is the same video line at 3.5, 7, 14 and 28 MHz.
+// NextZXOS dot commands such as NextGuide DISABLE interrupts and poll it
+// to sync to the raster, so it MUST advance as the CPU runs or the wait
+// hangs.
 func (u *ULA) ActiveVideoLine() int {
 	line, _ := u.BeamPosition()
 	return line
 }
 
 // BeamPosition returns the current raster beam position derived from the
-// CPU T-state counter: the scanline (0-based, 9-bit) and the horizontal
-// position in 8-pixel units (2 pixels per T-state, 8 pixels per hpos unit,
-// so hpos = (T-state-in-line)/4 → 0..56 across a 228-T-state line). This
-// lets the Copper, memory contention and (eventually) a per-scanline ULA
-// renderer query the beam mid-frame at per-T-state granularity instead of
-// the coarse scanline quantum. Returns (0,0) when no T-state source is
-// wired.
+// CPU T-state counter: the scanline and the horizontal position in 8-pixel
+// units (2 pixels per video T-state, 8 pixels per hpos unit, so
+// hpos = (video-T-state-in-line)/4, 0..56 across a 228-T-state line). This
+// lets the Copper, memory contention and a per-scanline ULA renderer query
+// the beam mid-frame. Returns (0,0) when no T-state source is wired.
+//
+// The line is a position inside the frame. These counters are anchored to
+// the Next's 128K timing (LinesPerFrame of TStatesPerLine), which is what
+// NextReg $1E/$1F counts.
 func (u *ULA) BeamPosition() (line, hpos int) {
 	if u.mem == nil || u.mem.TStates == nil {
 		return 0, 0
 	}
-	t := int(*u.mem.TStates - u.frameStartTstate)
-	if t < 0 {
-		t = 0
+	elapsed := int(*u.mem.TStates - u.frameStartTstate)
+	if elapsed < 0 {
+		elapsed = 0
 	}
-	t = u.videoTStates(t)
-	// Wrap at the frame, not at 9 bits. The old `& 0x1FF` bounded the line at
-	// 511, which is not a raster position: a frame is LinesPerFrame lines, and
-	// software polling NextReg $1E/$1F for a scanline is comparing against a
-	// number that must exist.
+	speed := 1
+	if u.mem.SpeedMultiplier != nil {
+		if m := u.mem.SpeedMultiplier(); m > 1 {
+			speed = m
+		}
+	}
+	lines := LinesPerFrame
+	// Frame length in CPU T-states. At 7, 14 and 28 MHz the counter runs
+	// `speed` times as many T-states in one video frame.
+	frameLen := TStatesPerLine * lines * speed
+	// Wrap at the frame, not at 9 bits. A line outside the frame is not a
+	// raster position, and software polling NextReg $1E/$1F compares against
+	// a number that must exist.
 	//
 	// Wrapping here also makes the counter independent of when the origin was
-	// last reset, which matters because that reset lives in the audio frame
-	// flush: with audio disabled, or in a loop that does not render every
-	// frame, the offset grows without bound and the masked version became a
-	// free-running counter with no relation to the beam.
-	t %= TStatesPerLine * LinesPerFrame
-	line = t / TStatesPerLine
-	hpos = (t % TStatesPerLine) / 4
+	// last reset. That reset lives in the audio frame flush: with audio
+	// disabled, or in a loop that does not render every frame, the offset
+	// grows without bound.
+	elapsed %= frameLen
+	line = elapsed * lines / frameLen
+	perLine := frameLen / lines
+	inLine := elapsed - line*perLine
+	hpos = (inLine / speed) / 4
 	return line, hpos
 }
 
@@ -2045,6 +2081,33 @@ func (u *ULA) stepCopperColumn(y, hc, debt int) int {
 	return debt
 }
 
+// paintTilemapBorderRow overlays the tilemap onto the border pixels of one
+// image row, using the tilemap's current X scroll. imageY is the row in the
+// 320x240 image (0 = top border). Paper rows only have their left and right
+// columns painted; rows above and below the paper are entirely border.
+func (u *ULA) paintTilemapBorderRow(imageY int) {
+	if u.nextCompositor == nil || !u.nextCompositor.HasActiveTilemap() {
+		return
+	}
+	if imageY < 0 || imageY >= TotalHeight || u.img == nil {
+		return
+	}
+	if u.compositorRow == nil {
+		u.compositorRow = make([]byte, TotalWidth*4)
+	}
+	rowFull := u.compositorRow
+	start := imageY * u.img.Stride
+	copy(rowFull, u.img.Pix[start:start+TotalWidth*4])
+	inBorder := func(x int) bool {
+		return x < BorderLeft || x >= BorderLeft+ScreenWidth
+	}
+	if imageY < BorderTop || imageY >= BorderTop+ScreenHeight {
+		inBorder = func(int) bool { return true }
+	}
+	u.nextCompositor.ComposeBorderRow(imageY, rowFull, inBorder)
+	copy(u.img.Pix[start:start+TotalWidth*4], rowFull)
+}
+
 func (u *ULA) applyNextCompositor() {
 	const w = 256
 	const h = 192
@@ -2082,6 +2145,20 @@ func (u *ULA) applyNextCompositor() {
 	journal := u.nextRasterLog
 	if journal != nil {
 		journal.BeginReplay()
+		// CPU writes in the top border are journalled before row 0.
+		// Apply them before painting that border, so its X scroll is
+		// the one in force above the paper.
+		journal.ApplyThrough(-1)
+	}
+	// Top border rows, with the scroll the frame starts on. Copper
+	// line 0 is the first paper line, so these rows are not copper
+	// lines of this frame; a MOVE that changes the scroll for the
+	// top border lands at the end of the previous frame and is
+	// already in this frame's starting state.
+	if u.nextCompositor.HasActiveTilemap() {
+		for imageY := 0; imageY < BorderTop; imageY++ {
+			u.paintTilemapBorderRow(imageY)
+		}
 	}
 	for y := 0; y < h; y++ {
 		// Bring the visual state up to this row before composing it.
@@ -2117,6 +2194,15 @@ func (u *ULA) applyNextCompositor() {
 		// every Next program including the overwhelming majority that never
 		// enable the Copper at all.
 		if u.nextCopper != nil && !u.nextCopper.Idle() {
+			// The scanline passed here is the paper row, which is copper
+			// line numbering at NR$64's reset of 0. Line 0 is the first
+			// ULA paper line. A WAIT for line L does not match that row:
+			// the copper releases it copperWaitLineBias lines later, on
+			// paper row L+8. The tilemap fetch stays at paper row + 24,
+			// so the WAIT lands on tilemap row L+32 while the tilemap
+			// picture stays aligned with sprites and Layer 2. The
+			// scanline itself is not shifted, so a frame restart still
+			// sees y wrap back to 0.
 			// Compose the row once from the state it starts in, then re-compose
 			// its tail from every pixel a Copper write lands in. Each
 			// re-compose overwrites only [p, w), so pixels generated earlier
@@ -2148,6 +2234,10 @@ func (u *ULA) applyNextCompositor() {
 			u.nextCompositor.ComposeScanline(y, ulaScan, composed)
 		}
 		copy(u.img.Pix[rowStart:rowStart+w*4], composed)
+		// Left and right border columns of this image row, with the
+		// scroll the line just left in the tilemap (a copper MOVE on
+		// this line, or the CPU write replayed for it).
+		u.paintTilemapBorderRow(BorderTop + y)
 	}
 	// Restore the state the guest actually left, including writes made below
 	// the last display row, so the border passes and the next frame both see
@@ -2158,9 +2248,10 @@ func (u *ULA) applyNextCompositor() {
 
 	// The rest of the frame is copper time too. cvc is loaded at the first
 	// active line and then counts EVERY line to c_max_vc
-	// (video/zxula_timing.vhd:455-466), so display row y is cvc y and the lines
-	// below the last displayed one are as real to the Copper as the displayed
-	// ones. Nothing gates it on active video on the way: the entity has no
+	// (video/zxula_timing.vhd:455-466), so paper row y is copper line y and
+	// the lines below the last paper row continue that count (192, 193, ...).
+	// Line 0 stays the first paper line. Nothing gates it on active video on
+	// the way: the entity has no
 	// display or blanking input at all (device/copper.vhd:28-42), its process is
 	// a plain rising_edge(clock_i) with no clock enable (device/copper.vhd:53-57),
 	// clock_i is the free-running i_CLK_28 (zxnext.vhd:43,3944), and the only
@@ -2190,39 +2281,21 @@ func (u *ULA) applyNextCompositor() {
 			for hc := 0; hc < columnsPerLine; hc++ {
 				u.copperDebt = u.stepCopperColumn(y, hc, u.copperDebt)
 			}
+			// Paper row y is image row y+BorderTop, so copper line 192
+			// is the first bottom-border image row. Paint that row
+			// after the line's copper steps, with the scroll the line
+			// left behind.
+			imageY := y + BorderTop
+			if imageY >= BorderTop+ScreenHeight && imageY < TotalHeight {
+				u.paintTilemapBorderRow(imageY)
+			}
 		}
 		resume()
-	}
-
-	// Border-area tilemap pass. Tilemap content in NextZXOS Browser
-	// (40×32 tile grid = 320×256 pixels) extends beyond the classic
-	// 256×192 inner screen into the 32-px L/R borders + 24-px T/B
-	// borders. The inner pass above already painted tilemap inside
-	// the 256×192 box; here we walk the FULL 320×240 image and only
-	// touch border pixels.
-	if u.nextCompositor.HasActiveTilemap() {
-		if u.compositorRow == nil {
-			u.compositorRow = make([]byte, TotalWidth*4)
-		}
-		rowFull := u.compositorRow
-		for y := 0; y < TotalHeight; y++ {
-			imgRowStart := y * u.img.Stride
-			copy(rowFull, u.img.Pix[imgRowStart:imgRowStart+TotalWidth*4])
-			// Tilemap y origin = top of image (y=0). The tilemap
-			// itself is 256 lines tall; rows 0..239 of the image
-			// map to tilemap rows 0..239 (the bottom 16 rows of
-			// the 256-line tilemap are cropped out of the 240-line
-			// image).
-			inBorder := func(x int) bool {
-				return x < BorderLeft || x >= BorderLeft+ScreenWidth
-			}
-			if y < BorderTop || y >= BorderTop+ScreenHeight {
-				// Above or below the inner screen: every x is
-				// border, paint the whole row.
-				inBorder = func(int) bool { return true }
-			}
-			u.nextCompositor.ComposeBorderRow(y, rowFull, inBorder)
-			copy(u.img.Pix[imgRowStart:imgRowStart+TotalWidth*4], rowFull)
+	} else if u.nextCompositor.HasActiveTilemap() {
+		// No per-line copper writes below the paper. The bottom border
+		// uses the scroll EndReplay just restored.
+		for imageY := BorderTop + ScreenHeight; imageY < TotalHeight; imageY++ {
+			u.paintTilemapBorderRow(imageY)
 		}
 	}
 

@@ -90,3 +90,42 @@ func TestBeamPositionAtTurboSpeed(t *testing.T) {
 		t.Errorf("mid line 5 at 28 MHz: got line=%d hpos=%d, want 5,10", line, hpos)
 	}
 }
+
+// TestActiveVideoLineFollowsTheFrameFraction pins the NextReg $1E/$1F
+// formula at every CPU speed:
+//
+//	line = T-states since frame start * lines per frame / frame length
+//
+// The frame length grows with the speed, so 100 CPU T-states past line 5
+// is still line 5 at 7, 14 and 28 MHz. Dividing the raw CPU counter by
+// the 3.5 MHz line length reports a different line as soon as the speed
+// is above 1.
+func TestActiveVideoLineFollowsTheFrameFraction(t *testing.T) {
+	for _, speed := range []int{1, 2, 4, 8} {
+		var ts uint64
+		mem := &memory.Memory{}
+		mem.TStates = &ts
+		mem.SpeedMultiplier = func() int { return speed }
+		u := &ULA{mem: mem}
+
+		const into = 100 // CPU T-states past the start of line 5
+		elapsed := speed*TStatesPerLine*5 + into
+		ts = uint64(elapsed)
+
+		lines := LinesPerFrame
+		frameLen := TStatesPerLine * lines * speed
+		wrapped := elapsed % frameLen
+		wantLine := wrapped * lines / frameLen
+		wantH := ((wrapped - wantLine*(frameLen/lines)) / speed) / 4
+
+		if line, hpos := u.BeamPosition(); line != wantLine || hpos != wantH {
+			t.Errorf("speed %d: line=%d hpos=%d, want %d,%d", speed, line, hpos, wantLine, wantH)
+		}
+		if got := u.ActiveVideoLine(); got != wantLine {
+			t.Errorf("speed %d: ActiveVideoLine = %d, want %d", speed, got, wantLine)
+		}
+		if speed > 1 && elapsed/TStatesPerLine == wantLine {
+			t.Fatalf("speed %d fixture matches a raw 3.5 MHz count, so it cannot catch a missing speed scale", speed)
+		}
+	}
+}

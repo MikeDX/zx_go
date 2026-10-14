@@ -606,3 +606,104 @@ func TestTilemap512TileMode(t *testing.T) {
 		t.Errorf("512-tile mode pixel0 = %d, want 9 (tile 256 via attr bit 0)", dst[0])
 	}
 }
+
+// TestBank7AddressesWrapAt8K pins the tilemap address width. Bank 7 map
+// and tile addresses wrap at 8 KB (mask 0x1FFF). Bank 5 is the full 16 KB
+// page (mask 0x3FFF), so the same offset reads the high half of the page.
+func TestBank7AddressesWrapAt8K(t *testing.T) {
+	// Map placed at offset 0x2000. On bank 7 that wraps to 0, where tile 1
+	// (nibble 7) lives. The decoy at 0x2000 is tile 2 (nibble 3). On bank 5
+	// the offset does not wrap, so the decoy is what renders.
+	mapWrap := func(bank7 bool) byte {
+		low := make([]byte, 0x4000)
+		high := make([]byte, 0x4000)
+		page := low
+		if bank7 {
+			page = high
+		}
+		page[0] = 0x01
+		page[0x2000] = 0x02
+		for col := 0; col < 4; col++ {
+			page[0x500+1*32+col] = 0x77
+			page[0x500+2*32+col] = 0x33
+		}
+		tm := New(&twoBank{bank5: low, bank7: high})
+		base := byte(0x20) // offset 0x2000
+		if bank7 {
+			base |= 0x80
+		}
+		tm.SetTileMapBase(base)
+		tiles := byte(0x05) // offset 0x0500, inside the low 8 KB
+		if bank7 {
+			tiles |= 0x80
+		}
+		tm.SetTilesBase(tiles)
+		tm.SetEnabled(true)
+		tm.SetMode40()
+		tm.SetStripFlags(true)
+		dst := make([]byte, 8)
+		tm.RenderScanline(0, dst)
+		return dst[0]
+	}
+	if got := mapWrap(true); got != 7 {
+		t.Errorf("bank 7 map at 0x2000 rendered nibble %d, want 7 (wrapped to offset 0)", got)
+	}
+	if got := mapWrap(false); got != 3 {
+		t.Errorf("bank 5 map at 0x2000 rendered nibble %d, want 3 (16 KB, no wrap)", got)
+	}
+
+	// Tile definitions placed at offset 0x2000. Tile 1's first row is 32
+	// bytes in, so bank 7 reads address 32 and bank 5 reads 0x2020.
+	tileWrap := func(bank7 bool) byte {
+		low := make([]byte, 0x4000)
+		high := make([]byte, 0x4000)
+		page := low
+		if bank7 {
+			page = high
+		}
+		page[0] = 0x01 // map: tile 1
+		for col := 0; col < 4; col++ {
+			page[32+col] = 0x77        // wrapped address of tile 1 row 0
+			page[0x2000+32+col] = 0x33 // unwrapped address
+		}
+		tm := New(&twoBank{bank5: low, bank7: high})
+		base := byte(0x00)
+		tiles := byte(0x20) // offset 0x2000
+		if bank7 {
+			base |= 0x80
+			tiles |= 0x80
+		}
+		tm.SetTileMapBase(base)
+		tm.SetTilesBase(tiles)
+		tm.SetEnabled(true)
+		tm.SetMode40()
+		tm.SetStripFlags(true)
+		dst := make([]byte, 8)
+		tm.RenderScanline(0, dst)
+		return dst[0]
+	}
+	if got := tileWrap(true); got != 7 {
+		t.Errorf("bank 7 tiles at 0x2000 rendered nibble %d, want 7 (wrapped to offset 32)", got)
+	}
+	if got := tileWrap(false); got != 3 {
+		t.Errorf("bank 5 tiles at 0x2000 rendered nibble %d, want 3 (16 KB, no wrap)", got)
+	}
+
+	// Textmode tile defs are 8 bytes. Tile 1 row 0 at 0x2000+8 wraps to 8
+	// on bank 7. Bit 7 set there, clear at the unwrapped address.
+	text := make([]byte, 0x4000)
+	text[0] = 0x01
+	text[8] = 0x80
+	text[0x2008] = 0x00
+	tm := New(&twoBank{bank7: text, bank5: make([]byte, 0x4000)})
+	tm.SetTileMapBase(0x80)
+	tm.SetTilesBase(0x80 | 0x20)
+	tm.SetDefaultAttr(0x02) // foreground index = (0x02 & 0xFE) | bit
+	tm.SetControl(0x20 | 0x08)
+	tm.SetEnabled(true)
+	dst := make([]byte, 8)
+	tm.RenderScanline(0, dst)
+	if dst[0] != 0x03 {
+		t.Errorf("bank 7 textmode tile at 0x2000: pixel 0 = $%02X, want $03 (wrapped, bit set)", dst[0])
+	}
+}
