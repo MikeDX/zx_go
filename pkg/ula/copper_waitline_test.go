@@ -6,21 +6,22 @@ import (
 	"github.com/conorarmstrong/zx_go/pkg/next/copper"
 )
 
-// TestCopperWaitLineIsThePaperLine pins NR$64's reset numbering.
+// TestCopperWaitLineFiresEightLinesLater pins the WAIT vertical match.
 //
-// WAIT line 0 is the first ULA paper line, 32 lines below the top of the
-// tilemap and Layer 2 frame. Line 16 is paper row 16. Line 232 is past the
-// paper (192 lines, then the bottom border and blanking) and must still
-// release, on that later line, without painting any paper row.
-func TestCopperWaitLineIsThePaperLine(t *testing.T) {
+// The render loop still passes the paper row as the copper scanline, so
+// line 0 is the first paper line. The WAIT compare is 8 lines later than
+// that numbering: WAIT line L first shows on paper row L+8. Rows before
+// that stay clear. Line 232 releases at line 240, still below the paper,
+// and still runs once.
+func TestCopperWaitLineFiresEightLinesLater(t *testing.T) {
 	cases := []struct {
 		name      string
 		line      int
 		wantPaper int // paper row the MOVE first shows on; -1 means no paper row
 	}{
-		{"line 0 is the first paper line", 0, 0},
-		{"line 16 is paper row 16", 16, 16},
-		{"line 232 is below the paper", 232, -1},
+		{"line 0 shows from paper row 8", 0, 8},
+		{"line 16 shows from paper row 24", 16, 24},
+		{"line 232 is still below the paper", 232, -1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

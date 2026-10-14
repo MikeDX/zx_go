@@ -556,11 +556,32 @@ func (u *ULA) SetNextSpritePort(s NextSpritePort) { u.nextSprite = s }
 // $103B / $113B dispatch to it when present.
 func (u *ULA) SetNextI2C(b NextI2C) { u.nextI2C = b }
 
+// copperWaitLineBias is how many lines later than the paper row a WAIT
+// for that row releases. The render loop still passes the paper row as
+// the copper scanline. WAIT line L matches paper row L+copperWaitLineBias,
+// which is tilemap row L+32 while the tilemap picture itself stays at
+// paper row + 24.
+const copperWaitLineBias = 8
+
+// copperWaitLineShifter is implemented by the Next copper. Mocks that
+// only record the scanline they are given do not implement it, so the
+// line number in those traces stays the paper row.
+type copperWaitLineShifter interface {
+	SetWaitLineBias(uint16)
+}
+
 // SetNextCopper installs the Spectrum Next Copper coprocessor.
-// The compositor pass calls Step once per active scanline so MOVEs
-// affecting palette / Layer 2 state are visible to that row's
-// composition. Passing nil unhooks.
-func (u *ULA) SetNextCopper(c NextCopper) { u.nextCopper = c }
+// The compositor pass calls Step once per raster column so MOVEs
+// affecting palette / Layer 2 state are visible from the pixel they
+// write in. A copper that accepts a WAIT line bias is given
+// copperWaitLineBias, so WAIT line L releases on paper row L+8.
+// The scanline passed to Step stays the paper line. Passing nil unhooks.
+func (u *ULA) SetNextCopper(c NextCopper) {
+	u.nextCopper = c
+	if s, ok := c.(copperWaitLineShifter); ok {
+		s.SetWaitLineBias(copperWaitLineBias)
+	}
+}
 
 // SetNextRasterLog installs the mid-frame raster journal. Passing nil (the
 // default, and every classic model) leaves the compositor pass exactly as it
@@ -1135,7 +1156,7 @@ func (u *ULA) renderWide() *image.RGBA {
 				rowWide[d+4], rowWide[d+5], rowWide[d+6], rowWide[d+7] = r, g, b, a
 			}
 		}
-		u.nextCompositor.ComposeWideTilemapRow(nextFrameRow(y), rowWide)
+		u.nextCompositor.ComposeWideTilemapRow(y, rowWide)
 		dstStart := y * wide.Stride
 		copy(wide.Pix[dstStart:dstStart+ww*4], rowWide)
 	}
@@ -2060,22 +2081,10 @@ func (u *ULA) stepCopperColumn(y, hc, debt int) int {
 	return debt
 }
 
-// nextFrameRow maps a row of the 240-line image onto the 256-line frame
-// shared by the tilemap, sprites and Layer 2. The image is the centre of
-// that frame: image row 0 is frame row 8, and the first paper line (image
-// row 24, copper WAIT line 0) is frame row 32.
-func nextFrameRow(imageY int) int {
-	const frameH = 256
-	return imageY + (frameH-TotalHeight)/2
-}
-
 // paintTilemapBorderRow overlays the tilemap onto the border pixels of one
 // image row, using the tilemap's current X scroll. imageY is the row in the
-// 320x240 image (0 = top border). The tilemap is asked for the frame row,
-// imageY mapped through nextFrameRow, so a paper line's border columns use
-// the same tilemap row as the paper (copper line L is frame row L+32).
-// Paper rows only have their left and right columns painted; rows above and
-// below the paper are entirely border.
+// 320x240 image (0 = top border). Paper rows only have their left and right
+// columns painted; rows above and below the paper are entirely border.
 func (u *ULA) paintTilemapBorderRow(imageY int) {
 	if u.nextCompositor == nil || !u.nextCompositor.HasActiveTilemap() {
 		return
@@ -2095,7 +2104,7 @@ func (u *ULA) paintTilemapBorderRow(imageY int) {
 	if imageY < BorderTop || imageY >= BorderTop+ScreenHeight {
 		inBorder = func(int) bool { return true }
 	}
-	u.nextCompositor.ComposeBorderRow(nextFrameRow(imageY), rowFull, inBorder)
+	u.nextCompositor.ComposeBorderRow(imageY, rowFull, inBorder)
 	copy(u.img.Pix[start:start+TotalWidth*4], rowFull)
 }
 
@@ -2185,11 +2194,15 @@ func (u *ULA) applyNextCompositor() {
 		// every Next program including the overwhelming majority that never
 		// enable the Copper at all.
 		if u.nextCopper != nil && !u.nextCopper.Idle() {
-			// Copper WAIT lines are paper lines when NR$64 is at its reset
-			// of 0. Line 0 is the first ULA paper line, 32 lines below the
-			// top of the tilemap and Layer 2 frame, and this loop's y is
-			// that line. An offset in NR$64 would be added to y; nothing
-			// here adds the 32-line frame bias on top of that.
+			// The scanline passed here is the paper row, which is copper
+			// line numbering at NR$64's reset of 0. Line 0 is the first
+			// ULA paper line. A WAIT for line L does not match that row:
+			// the copper releases it copperWaitLineBias lines later, on
+			// paper row L+8. The tilemap fetch stays at paper row + 24,
+			// so the WAIT lands on tilemap row L+32 while the tilemap
+			// picture stays aligned with sprites and Layer 2. The
+			// scanline itself is not shifted, so a frame restart still
+			// sees y wrap back to 0.
 			// Compose the row once from the state it starts in, then re-compose
 			// its tail from every pixel a Copper write lands in. Each
 			// re-compose overwrites only [p, w), so pixels generated earlier
@@ -2295,7 +2308,9 @@ func (u *ULA) applyNextCompositor() {
 	// rows. The sprite engine's over-border clip gates whether they show.
 	if u.nextCompositor.HasActiveSprites() {
 		// The image (TotalHeight=240, BorderTop) is the centre of the 256-line
-		// sprite frame (top border 32): image row r is frame row nextFrameRow(r).
+		// sprite frame (top border 32): image row r = frame vcounter r + bias.
+		const spriteFrameH = 256
+		bias := (spriteFrameH - TotalHeight) / 2 // 8 for a 240-line image
 		if u.compositorRow == nil {
 			u.compositorRow = make([]byte, TotalWidth*4)
 		}
@@ -2309,7 +2324,7 @@ func (u *ULA) applyNextCompositor() {
 			if y < BorderTop || y >= BorderTop+ScreenHeight {
 				inBorder = func(int) bool { return true }
 			}
-			u.nextCompositor.ComposeSpriteBorderRow(nextFrameRow(y), rowFull, inBorder)
+			u.nextCompositor.ComposeSpriteBorderRow(y+bias, rowFull, inBorder)
 			copy(u.img.Pix[imgRowStart:imgRowStart+TotalWidth*4], rowFull)
 		}
 	}

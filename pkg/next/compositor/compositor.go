@@ -33,6 +33,17 @@ const BorderOffsetX = 32
 // when it asks the sprite layer for a paper row.
 const SpriteFrameYTop = 32
 
+// TilemapImageYTop is the tilemap row of the paper's top edge.
+//
+// The tilemap is anchored to the 320x240 image, the same origin the border
+// pass and the wide path already use, and that image has a 24-pixel top
+// border. Paper row N is therefore tilemap row N+TilemapImageYTop. That is
+// the same scanline as sprite frame row N+SpriteFrameYTop: the 8-pixel
+// difference is the crop between the 256-line sprite frame and the 240-line
+// image. Fetching paper row N from tilemap row N left the paper 24 lines
+// above the border columns of that scanline.
+const TilemapImageYTop = 24
+
 // DefaultTransparency is the Next-default 8-bit palette-mapped colour
 // (NextReg 0x14 reset value) used as the global transparency colour for
 // Layer 2 and the sprite layer until a guest writes NextReg 0x14 / 0x4B.
@@ -277,8 +288,8 @@ func (c *Compositor) Layer2Width() int {
 // right 32-px border, plus the full 320-px width of border rows
 // above and below the classic screen area.
 //
-// `dst` is 320x4 RGBA bytes. `tilemapY` is the frame row (0 = top of the
-// 256-line tilemap, 32 = the first paper line). `isInBorderArea(x)` returns
+// `dst` is 320x4 RGBA bytes for image row `tilemapY` (0 = top of the
+// 320x240 image, the tilemap's origin). `isInBorderArea(x)` returns
 // true for x values OUTSIDE the central 256-px inner area. Those are
 // the pixels this pass paints; inner pixels are left alone (the inner
 // pass already handled them).
@@ -558,15 +569,15 @@ func (c *Compositor) ComposeScanlineRange(y int, ulaRGBA []byte, dst []byte, x0,
 		if tilemapPal == nil {
 			doTilemap = false
 		} else {
-			// Render the FULL 320-pixel tilemap row in frame coordinates.
-			// The caller passes the paper row. The tilemap shares the
-			// 320x256 frame with sprites and Layer 2, whose top is
-			// SpriteFrameYTop rows above the first paper line, so paper
-			// row N is tilemap row N+SpriteFrameYTop. Copper WAIT line N
-			// is that same paper line, so the WAIT lands on tilemap row
-			// N+32. The inner pass then takes the centred 256 pixels
-			// (cols 32..287). The border pass is given the same frame row.
-			c.tilemap.RenderScanlineFlags(y+SpriteFrameYTop, c.tilemapScratch[:], c.tilemapEn[:], c.tilemapBelow[:])
+			// Render the FULL 320-pixel tilemap row in image coordinates.
+			// The caller passes the paper row; the tilemap's origin is the
+			// top of the 320x240 image, so the paper starts TilemapImageYTop
+			// rows down. The inner 256-wide compose pass then uses the
+			// centred 256 pixels (cols 32..287, the columns that overlap
+			// the classic screen when tilemap col 0 maps to image col 0).
+			// The border pass asks for the same image row, so the paper and
+			// the border columns of one scanline come from one tilemap row.
+			c.tilemap.RenderScanlineFlags(y+TilemapImageYTop, c.tilemapScratch[:], c.tilemapEn[:], c.tilemapBelow[:])
 			tilemapScan = c.tilemapScratch[BorderOffsetX : BorderOffsetX+Width]
 			tilemapEn = c.tilemapEn[BorderOffsetX : BorderOffsetX+Width]
 			tilemapBelow = c.tilemapBelow[BorderOffsetX : BorderOffsetX+Width]
