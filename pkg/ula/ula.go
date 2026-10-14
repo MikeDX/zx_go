@@ -1334,47 +1334,62 @@ func (u *ULA) renderHiResLayer2() *image.RGBA {
 	return wide
 }
 
-// ActiveVideoLine returns the current raster line within the frame,
-// derived from the CPU's T-state position (T-states since frame start /
-// T-states-per-line). It is a 9-bit counter (0..511). The Spectrum Next
-// exposes this via NextReg $1E (MSB, bit 0) / $1F (LSB): NextZXOS dot
-// commands such as NextGuide DISABLE interrupts and poll it to sync to
-// the raster, so it MUST advance as the CPU runs or the wait hangs.
+// ActiveVideoLine returns the current raster line within the frame, the
+// value NextReg $1E (MSB, bit 0) / $1F (LSB) reads back:
+//
+//	line = T-states since frame start * lines per frame / frame length
+//
+// The frame length is the 3.5 MHz frame times the CPU speed, so the same
+// fraction of the frame is the same video line at 3.5, 7, 14 and 28 MHz.
+// NextZXOS dot commands such as NextGuide DISABLE interrupts and poll it
+// to sync to the raster, so it MUST advance as the CPU runs or the wait
+// hangs.
 func (u *ULA) ActiveVideoLine() int {
 	line, _ := u.BeamPosition()
 	return line
 }
 
 // BeamPosition returns the current raster beam position derived from the
-// CPU T-state counter: the scanline (0-based, 9-bit) and the horizontal
-// position in 8-pixel units (2 pixels per T-state, 8 pixels per hpos unit,
-// so hpos = (T-state-in-line)/4 → 0..56 across a 228-T-state line). This
-// lets the Copper, memory contention and (eventually) a per-scanline ULA
-// renderer query the beam mid-frame at per-T-state granularity instead of
-// the coarse scanline quantum. Returns (0,0) when no T-state source is
-// wired.
+// CPU T-state counter: the scanline and the horizontal position in 8-pixel
+// units (2 pixels per video T-state, 8 pixels per hpos unit, so
+// hpos = (video-T-state-in-line)/4, 0..56 across a 228-T-state line). This
+// lets the Copper, memory contention and a per-scanline ULA renderer query
+// the beam mid-frame. Returns (0,0) when no T-state source is wired.
+//
+// The line is a position inside the frame. These counters are anchored to
+// the Next's 128K timing (LinesPerFrame of TStatesPerLine), which is what
+// NextReg $1E/$1F counts.
 func (u *ULA) BeamPosition() (line, hpos int) {
 	if u.mem == nil || u.mem.TStates == nil {
 		return 0, 0
 	}
-	t := int(*u.mem.TStates - u.frameStartTstate)
-	if t < 0 {
-		t = 0
+	elapsed := int(*u.mem.TStates - u.frameStartTstate)
+	if elapsed < 0 {
+		elapsed = 0
 	}
-	t = u.videoTStates(t)
-	// Wrap at the frame, not at 9 bits. The old `& 0x1FF` bounded the line at
-	// 511, which is not a raster position: a frame is LinesPerFrame lines, and
-	// software polling NextReg $1E/$1F for a scanline is comparing against a
-	// number that must exist.
+	speed := 1
+	if u.mem.SpeedMultiplier != nil {
+		if m := u.mem.SpeedMultiplier(); m > 1 {
+			speed = m
+		}
+	}
+	lines := LinesPerFrame
+	// Frame length in CPU T-states. At 7, 14 and 28 MHz the counter runs
+	// `speed` times as many T-states in one video frame.
+	frameLen := TStatesPerLine * lines * speed
+	// Wrap at the frame, not at 9 bits. A line outside the frame is not a
+	// raster position, and software polling NextReg $1E/$1F compares against
+	// a number that must exist.
 	//
 	// Wrapping here also makes the counter independent of when the origin was
-	// last reset, which matters because that reset lives in the audio frame
-	// flush: with audio disabled, or in a loop that does not render every
-	// frame, the offset grows without bound and the masked version became a
-	// free-running counter with no relation to the beam.
-	t %= TStatesPerLine * LinesPerFrame
-	line = t / TStatesPerLine
-	hpos = (t % TStatesPerLine) / 4
+	// last reset. That reset lives in the audio frame flush: with audio
+	// disabled, or in a loop that does not render every frame, the offset
+	// grows without bound.
+	elapsed %= frameLen
+	line = elapsed * lines / frameLen
+	perLine := frameLen / lines
+	inLine := elapsed - line*perLine
+	hpos = (inLine / speed) / 4
 	return line, hpos
 }
 
