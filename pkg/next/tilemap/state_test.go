@@ -267,6 +267,8 @@ func TestEveryFieldOfTheLayerIsCaptured(t *testing.T) {
 		// mem is the RAM bus (pkg/memory); it captures itself under its own name
 		// in the machinestate registry, and holds no tilemap state of its own.
 		"mem": true,
+		// clipYBias is wiring set once by the compositor, not guest state.
+		"clipybias": true,
 	}
 	st := reflect.TypeOf(tilemapState{})
 	for i := 0; i < st.NumField(); i++ {

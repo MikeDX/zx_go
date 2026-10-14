@@ -150,7 +150,14 @@ type Compositor struct {
 // Compositor uses the tilemap's "on_top" bit (NR$6B bit 0) to
 // decide whether to paint it after every other layer or under
 // ULA; for now we honour on_top by painting it last when set.
-func (c *Compositor) SetTilemap(t *tilemap.Tilemap) { c.tilemap = t }
+func (c *Compositor) SetTilemap(t *tilemap.Tilemap) {
+	c.tilemap = t
+	if t != nil {
+		// The compositor renders 320x240 image rows; the NR$1B clip Y
+		// bounds are 320x256 frame rows (SpriteFrameYTop-TilemapImageYTop).
+		t.SetClipYBias(SpriteFrameYTop - TilemapImageYTop)
+	}
+}
 
 // HasActiveTilemap reports whether the tilemap layer is wired and
 // enabled. The ULA's full-screen border pass uses this to decide

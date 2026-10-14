@@ -51,6 +51,7 @@ type Tilemap struct {
 	clipX2      byte
 	clipY1      byte // visible Y is [clipY1, clipY2]
 	clipY2      byte
+	clipYBias   int // added to y before the clip Y test (SetClipYBias)
 }
 
 // New constructs a tilemap reader. Disabled by default; clip window
@@ -162,6 +163,13 @@ func (t *Tilemap) RenderScanlineBelow(y int, dst, below []byte) {
 //
 // Either plane may be nil, and each is only as long as the caller made
 // it.
+// SetClipYBias sets the number of rows added to the y a caller renders
+// before it is compared with the NR$1B clip Y bounds. The docs
+// (wiki.specnext.dev/Clip_Window_Tilemap) define those bounds in the
+// 320x256 tilemap area; a caller that renders rows of the 320x240 image
+// passes 8 here.
+func (t *Tilemap) SetClipYBias(n int) { t.clipYBias = n }
+
 func (t *Tilemap) RenderScanlineFlags(y int, dst, en, below []byte) {
 	for i := range dst {
 		dst[i] = 0
@@ -179,7 +187,8 @@ func (t *Tilemap) RenderScanlineFlags(y int, dst, en, below []byte) {
 		return
 	}
 	// Clip window (NR$1B): rows outside [clipY1, clipY2] are transparent.
-	if y < int(t.clipY1) || y > int(t.clipY2) {
+	// Y bounds are in 256-line frame rows; see SetClipYBias.
+	if fy := y + t.clipYBias; fy < int(t.clipY1) || fy > int(t.clipY2) {
 		return
 	}
 
