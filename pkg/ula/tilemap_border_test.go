@@ -64,10 +64,10 @@ func indexOf(ev []string, want string) int {
 // sampled after the whole frame's copper has run.
 //
 // The top border is painted before paper row 0. Each paper row's left and
-// right columns are painted after that row's copper steps, at the image
-// row (paper + 24). The bottom border is painted as the copper walks the
-// lines below the paper, so a MOVE on copper line 192 affects the first
-// bottom-border row and not the rows above it.
+// right columns are painted after that row's copper steps, at frame row
+// L+32. The bottom border is painted as the copper walks the lines below
+// the paper, so a MOVE on copper line 192 affects the first bottom-border
+// row and not the rows above it.
 func TestTilemapBorderIsPaintedPerScanline(t *testing.T) {
 	u, _ := newFloatingBusULA(t)
 	comp := &borderTrace{}
@@ -77,33 +77,33 @@ func TestTilemapBorderIsPaintedPerScanline(t *testing.T) {
 	u.applyNextCompositor()
 
 	ev := comp.ev
-	if indexOf(ev, "border 0") < 0 || indexOf(ev, "border 0") > indexOf(ev, "paper 0") {
-		t.Fatalf("top border row 0 must be painted before paper row 0, events start %v", ev[:8])
+	// Image row 0 is frame row 8. It is painted before the paper.
+	if indexOf(ev, "border 8") < 0 || indexOf(ev, "border 8") > indexOf(ev, "paper 0") {
+		t.Fatalf("top border frame row 8 must be painted before paper row 0, events start %v", ev[:8])
 	}
-	// Paper row 16's copper (line 16) runs before its border columns,
-	// which live on image row 40.
+	// Copper line 16 runs before that line's border, which is frame row 48.
 	cu16 := indexOf(ev, "cu 16")
-	border40 := indexOf(ev, "border 40")
+	border48 := indexOf(ev, "border 48")
 	paper17 := indexOf(ev, "paper 17")
-	if cu16 < 0 || border40 < 0 || !(cu16 < border40 && border40 < paper17) {
-		t.Fatalf("want cu 16, then border 40, then paper 17; got cu16=%d border40=%d paper17=%d",
-			cu16, border40, paper17)
+	if cu16 < 0 || border48 < 0 || !(cu16 < border48 && border48 < paper17) {
+		t.Fatalf("want cu 16, then border 48, then paper 17; got cu16=%d border48=%d paper17=%d",
+			cu16, border48, paper17)
 	}
-	// Copper line 192 is the first bottom-border image row (192+24=216),
+	// Copper line 192 is the first bottom-border frame row (192+32=224),
 	// painted after that line's steps and before the next copper line.
 	cu192 := indexOf(ev, "cu 192")
-	border216 := indexOf(ev, "border 216")
+	border224 := indexOf(ev, "border 224")
 	cu193 := indexOf(ev, "cu 193")
-	if cu192 < 0 || border216 < 0 || cu193 < 0 || !(cu192 < border216 && border216 < cu193) {
-		t.Fatalf("want cu 192, then border 216, then cu 193; got %d, %d, %d",
-			cu192, border216, cu193)
+	if cu192 < 0 || border224 < 0 || cu193 < 0 || !(cu192 < border224 && border224 < cu193) {
+		t.Fatalf("want cu 192, then border 224, then cu 193; got %d, %d, %d",
+			cu192, border224, cu193)
 	}
 	cu215 := indexOf(ev, "cu 215")
-	border239 := indexOf(ev, "border 239")
+	border247 := indexOf(ev, "border 247")
 	cu216 := indexOf(ev, "cu 216")
-	if cu215 < 0 || border239 < 0 || cu216 < 0 || !(cu215 < border239 && border239 < cu216) {
-		t.Fatalf("want cu 215, then border 239, then cu 216; got %d, %d, %d",
-			cu215, border239, cu216)
+	if cu215 < 0 || border247 < 0 || cu216 < 0 || !(cu215 < border247 && border247 < cu216) {
+		t.Fatalf("want cu 215, then border 247, then cu 216; got %d, %d, %d",
+			cu215, border247, cu216)
 	}
 }
 
@@ -116,8 +116,8 @@ func (idleBorderCopper) Wrote() bool                  { return false }
 func (idleBorderCopper) Idle() bool                   { return true }
 
 // TestTilemapBorderWithoutCopperStillUsesImageRows pins the idle-copper
-// path. It still paints every image row, top border first and the bottom
-// border after the paper, at image coordinates.
+// path. It still paints every row, top border first and the bottom border
+// after the paper, at frame coordinates (paper line L is frame row L+32).
 func TestTilemapBorderWithoutCopperStillUsesImageRows(t *testing.T) {
 	u, _ := newFloatingBusULA(t)
 	comp := &borderTrace{}
@@ -127,22 +127,22 @@ func TestTilemapBorderWithoutCopperStillUsesImageRows(t *testing.T) {
 	u.applyNextCompositor()
 
 	ev := comp.ev
-	if indexOf(ev, "border 0") > indexOf(ev, "paper 0") {
+	if indexOf(ev, "border 8") > indexOf(ev, "paper 0") {
 		t.Fatal("top border painted after the paper")
 	}
 	paper0 := indexOf(ev, "paper 0")
-	border24 := indexOf(ev, "border 24")
+	border32 := indexOf(ev, "border 32")
 	paper1 := indexOf(ev, "paper 1")
-	if !(paper0 < border24 && border24 < paper1) {
-		t.Fatalf("want paper 0, border 24, paper 1; got %d, %d, %d", paper0, border24, paper1)
+	if !(paper0 < border32 && border32 < paper1) {
+		t.Fatalf("want paper 0, border 32, paper 1; got %d, %d, %d", paper0, border32, paper1)
 	}
 	paper191 := indexOf(ev, "paper 191")
-	border215 := indexOf(ev, "border 215")
-	border216 := indexOf(ev, "border 216")
-	border239 := indexOf(ev, "border 239")
-	if !(paper191 < border215 && border215 < border216 && border216 < border239) {
-		t.Fatalf("bottom border out of order: paper191=%d border215=%d border216=%d border239=%d",
-			paper191, border215, border216, border239)
+	border223 := indexOf(ev, "border 223")
+	border224 := indexOf(ev, "border 224")
+	border247 := indexOf(ev, "border 247")
+	if !(paper191 < border223 && border223 < border224 && border224 < border247) {
+		t.Fatalf("bottom border out of order: paper191=%d border223=%d border224=%d border247=%d",
+			paper191, border223, border224, border247)
 	}
 	if indexOf(ev, "cu 0") >= 0 {
 		t.Fatal("an idle copper was stepped")

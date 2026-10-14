@@ -1135,7 +1135,7 @@ func (u *ULA) renderWide() *image.RGBA {
 				rowWide[d+4], rowWide[d+5], rowWide[d+6], rowWide[d+7] = r, g, b, a
 			}
 		}
-		u.nextCompositor.ComposeWideTilemapRow(y, rowWide)
+		u.nextCompositor.ComposeWideTilemapRow(nextFrameRow(y), rowWide)
 		dstStart := y * wide.Stride
 		copy(wide.Pix[dstStart:dstStart+ww*4], rowWide)
 	}
@@ -2060,10 +2060,22 @@ func (u *ULA) stepCopperColumn(y, hc, debt int) int {
 	return debt
 }
 
+// nextFrameRow maps a row of the 240-line image onto the 256-line frame
+// shared by the tilemap, sprites and Layer 2. The image is the centre of
+// that frame: image row 0 is frame row 8, and the first paper line (image
+// row 24, copper WAIT line 0) is frame row 32.
+func nextFrameRow(imageY int) int {
+	const frameH = 256
+	return imageY + (frameH-TotalHeight)/2
+}
+
 // paintTilemapBorderRow overlays the tilemap onto the border pixels of one
 // image row, using the tilemap's current X scroll. imageY is the row in the
-// 320x240 image (0 = top border). Paper rows only have their left and right
-// columns painted; rows above and below the paper are entirely border.
+// 320x240 image (0 = top border). The tilemap is asked for the frame row,
+// imageY mapped through nextFrameRow, so a paper line's border columns use
+// the same tilemap row as the paper (copper line L is frame row L+32).
+// Paper rows only have their left and right columns painted; rows above and
+// below the paper are entirely border.
 func (u *ULA) paintTilemapBorderRow(imageY int) {
 	if u.nextCompositor == nil || !u.nextCompositor.HasActiveTilemap() {
 		return
@@ -2083,7 +2095,7 @@ func (u *ULA) paintTilemapBorderRow(imageY int) {
 	if imageY < BorderTop || imageY >= BorderTop+ScreenHeight {
 		inBorder = func(int) bool { return true }
 	}
-	u.nextCompositor.ComposeBorderRow(imageY, rowFull, inBorder)
+	u.nextCompositor.ComposeBorderRow(nextFrameRow(imageY), rowFull, inBorder)
 	copy(u.img.Pix[start:start+TotalWidth*4], rowFull)
 }
 
@@ -2283,9 +2295,7 @@ func (u *ULA) applyNextCompositor() {
 	// rows. The sprite engine's over-border clip gates whether they show.
 	if u.nextCompositor.HasActiveSprites() {
 		// The image (TotalHeight=240, BorderTop) is the centre of the 256-line
-		// sprite frame (top border 32): image row r = frame vcounter r + bias.
-		const spriteFrameH = 256
-		bias := (spriteFrameH - TotalHeight) / 2 // 8 for a 240-line image
+		// sprite frame (top border 32): image row r is frame row nextFrameRow(r).
 		if u.compositorRow == nil {
 			u.compositorRow = make([]byte, TotalWidth*4)
 		}
@@ -2299,7 +2309,7 @@ func (u *ULA) applyNextCompositor() {
 			if y < BorderTop || y >= BorderTop+ScreenHeight {
 				inBorder = func(int) bool { return true }
 			}
-			u.nextCompositor.ComposeSpriteBorderRow(y+bias, rowFull, inBorder)
+			u.nextCompositor.ComposeSpriteBorderRow(nextFrameRow(y), rowFull, inBorder)
 			copy(u.img.Pix[imgRowStart:imgRowStart+TotalWidth*4], rowFull)
 		}
 	}

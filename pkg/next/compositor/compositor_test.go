@@ -799,26 +799,23 @@ func TestComposeScanlineRangeWithNoLayersLeavesTheHeadAlone(t *testing.T) {
 	}
 }
 
-// And the bounded copy still has to handle the whole-row case identically, so
-// the ordinary full-width call is unaffected.
-// TestPaperTilemapRowIsTheImageRow pins that paper composition fetches the
-// tilemap at the image row (paper + 24), the same row the border pass uses.
-//
-// The tilemap origin is the top of the 320x240 image. Paper row 0 is image
-// row 24, so it must show the tile parked on map row 3 (pixel rows 24-31)
-// and not the tile parked on map row 0. The border pass at image row 24
-// shows that same tile, including in the columns the paper compose reads
-// (x = 32 onwards). Both ComposeScanline and ComposeScanlineRange go
-// through this fetch, which is the idle-copper path and the copper path.
-func TestPaperTilemapRowIsTheImageRow(t *testing.T) {
+// TestWaitLineSelectsTilemapRowPlus32 pins the tilemap to the same 256-line
+// frame as sprites. Copper WAIT line L is paper row L, and that row is
+// tilemap frame row L+32 (SpriteFrameYTop below the tilemap top). Row L+24
+// is the 240-line image crop and must not be the row a WAIT lands on.
+// The border pass at frame row L+32 shows the same tile.
+func TestWaitLineSelectsTilemapRowPlus32(t *testing.T) {
 	br := &fakeBankReader{}
 	bank := make([]byte, 16384)
-	// Map row 0 (image row 0): tile 1. Map row 3 (image rows 24-31): tile 2.
+	// Map row (pixelRow/8) selects the tile. Tile 1 is red, tile 2 is green.
+	// Line 0's correct row is 32 (map row 4); the 24-crop row is 24 (map row 3).
+	// Line 16's correct row is 48 (map row 6); the 24-crop row is 40 (map row 5).
 	for x := 0; x < 40; x++ {
-		bank[x] = 0x01
-		bank[3*40+x] = 0x02
+		bank[3*40+x] = 0x01
+		bank[4*40+x] = 0x02
+		bank[5*40+x] = 0x01
+		bank[6*40+x] = 0x02
 	}
-	// Tile 1 pixel-row 0 = nibble 1. Tile 2 pixel-row 0 = nibble 2.
 	for col := 0; col < 4; col++ {
 		bank[0x500+1*32+col] = 0x11
 		bank[0x500+2*32+col] = 0x22
@@ -833,14 +830,14 @@ func TestPaperTilemapRowIsTheImageRow(t *testing.T) {
 
 	pal := palette.NewBank()
 	pal.Select(palette.PaletteTilemapFirst)
-	pal.Active().Set(0x01, 0b1_1100_0000) // red
-	pal.Active().Set(0x02, 0b0_0011_1000) // green
+	pal.Active().Set(0x01, 0b1_1100_0000) // red, the L+24 row
+	pal.Active().Set(0x02, 0b0_0011_1000) // green, the L+32 row
 	pal.Select(0)
 
 	c := New(pal, nil)
 	c.SetTilemap(tm)
-
 	ula := make([]byte, Width*4)
+
 	isRed := func(dst []byte, x int) bool {
 		return dst[x*4] != 0 && dst[x*4+1] == 0 && dst[x*4+2] == 0
 	}
@@ -848,38 +845,37 @@ func TestPaperTilemapRowIsTheImageRow(t *testing.T) {
 		return dst[x*4] == 0 && dst[x*4+1] != 0 && dst[x*4+2] == 0
 	}
 
-	paper := make([]byte, Width*4)
-	c.ComposeScanline(0, ula, paper)
-	if !isGreen(paper, 0) {
-		t.Errorf("paper row 0 pixel 0: rgb=%d/%d/%d, want green (tilemap image row 24)",
-			paper[0], paper[1], paper[2])
-	}
-	if isRed(paper, 0) {
-		t.Error("paper row 0 showed tilemap row 0 (red); the paper must use the image row")
-	}
+	for _, line := range []int{0, 16} {
+		frame := line + SpriteFrameYTop
+		paper := make([]byte, Width*4)
+		c.ComposeScanline(line, ula, paper)
+		if !isGreen(paper, 0) {
+			t.Errorf("WAIT line %d (paper row %d): rgb=%d/%d/%d, want green (tilemap row %d)",
+				line, line, paper[0], paper[1], paper[2], frame)
+		}
+		if isRed(paper, 0) {
+			t.Errorf("WAIT line %d landed on tilemap row %d; want row %d", line, line+24, frame)
+		}
 
-	// The copper path composes a range of the same row and must agree.
-	ranged := make([]byte, Width*4)
-	c.ComposeScanlineRange(0, ula, ranged, 0, Width)
-	if !isGreen(ranged, 0) {
-		t.Errorf("ranged paper row 0: rgb=%d/%d/%d, want green", ranged[0], ranged[1], ranged[2])
-	}
+		ranged := make([]byte, Width*4)
+		c.ComposeScanlineRange(line, ula, ranged, 0, Width)
+		if !isGreen(ranged, 0) {
+			t.Errorf("ranged WAIT line %d: rgb=%d/%d/%d, want green", line, ranged[0], ranged[1], ranged[2])
+		}
 
-	// Image row 24 is the border pass's name for the same scanline. Its
-	// paper columns (x >= 32) are the same green tile.
-	border := make([]byte, FullWidth*4)
-	c.ComposeBorderRow(TilemapImageYTop, border, func(int) bool { return true })
-	if !isGreen(border, BorderOffsetX) {
-		t.Errorf("border image row 24 at x=%d: rgb=%d/%d/%d, want green, same tile as the paper",
-			BorderOffsetX, border[BorderOffsetX*4], border[BorderOffsetX*4+1], border[BorderOffsetX*4+2])
-	}
+		border := make([]byte, FullWidth*4)
+		c.ComposeBorderRow(frame, border, func(int) bool { return true })
+		if !isGreen(border, BorderOffsetX) {
+			t.Errorf("border frame row %d: rgb=%d/%d/%d, want green, same tile as WAIT line %d",
+				frame, border[BorderOffsetX*4], border[BorderOffsetX*4+1], border[BorderOffsetX*4+2], line)
+		}
 
-	// Image row 0 is the tilemap's top, 24 lines above the paper, and it
-	// is the red tile.
-	top := make([]byte, FullWidth*4)
-	c.ComposeBorderRow(0, top, func(int) bool { return true })
-	if !isRed(top, 0) {
-		t.Errorf("image row 0: rgb=%d/%d/%d, want red (tilemap row 0)", top[0], top[1], top[2])
+		early := make([]byte, FullWidth*4)
+		c.ComposeBorderRow(line+24, early, func(int) bool { return true })
+		if !isRed(early, 0) {
+			t.Errorf("frame row %d: rgb=%d/%d/%d, want red (this is the 24-line crop, not WAIT line %d)",
+				line+24, early[0], early[1], early[2], line)
+		}
 	}
 }
 
@@ -979,6 +975,8 @@ func TestComposeBorderRowHonoursScrollClipAndTransparency(t *testing.T) {
 	}
 }
 
+// And the bounded copy still has to handle the whole-row case identically, so
+// the ordinary full-width call is unaffected.
 func TestComposeScanlineRangeWithNoLayersPaintsAFullRow(t *testing.T) {
 	c := New(nil, nil)
 	ula := make([]byte, Width*4)
