@@ -2788,6 +2788,9 @@ func main() {
 	// Headless mode skips the entire Fyne / GUI path. Wire trace
 	// hooks against a freshly-constructed emulator, run frames,
 	// optionally dump state, exit.
+	if *nextsNex != "" {
+		runNexts()
+	}
 	if flags.headless {
 		// The SAM has its own memory/IO and isn't wired into runHeadless's
 		// Spectrum-bound instrumentation; use its dedicated headless path.
