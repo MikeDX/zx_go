@@ -110,6 +110,10 @@ type ULA struct {
 	compositorComposed []byte
 	compositorRow      []byte
 	palette            [16]color.RGBA
+	// nextULAColour, when set, returns the Next ULA palette colour at a
+	// palette index (0-15 ink, 16-31 paper and border) and whether the
+	// guest has programmed it. Unprogrammed entries use u.palette.
+	nextULAColour func(index byte) (color.RGBA, bool)
 	// borderTracer, if non-nil, fires on every border-colour change
 	// caused by an even-port write. Used by the debugger to observe
 	// border modulation through any port that matches the ULA's
@@ -795,7 +799,7 @@ func (u *ULA) paintBorder(changes []borderChange, colour byte) {
 			if inPaperRows && x >= BorderLeft && x < BorderLeft+ScreenWidth {
 				continue
 			}
-			c := u.palette[colour]
+			c := u.borderRGBA(colour)
 			for px := x; px < x+unitPx; px++ {
 				u.img.SetRGBA(px, y, c)
 			}
@@ -1008,8 +1012,8 @@ func (u *ULA) render() *image.RGBA {
 				paperIdx += 8
 			}
 
-			ink := u.palette[inkIdx]
-			paper := u.palette[paperIdx]
+			ink := u.inkRGBA(inkIdx)
+			paper := u.paperRGBA(paperIdx)
 
 			if u.flash && (attr&0x80) != 0 {
 				ink, paper = paper, ink
@@ -1095,7 +1099,7 @@ func (u *ULA) renderNextFullHeight() *image.RGBA {
 	copy(dst.Pix[extra*dst.Stride:(extra+TotalHeight)*dst.Stride], u.img.Pix[:TotalHeight*u.img.Stride])
 	// Over-border strips: border fill + the sprite border pass (whole row is
 	// border in these strips). frameY == dst row here (bias 0).
-	bc := u.palette[u.BorderColour&0x0F]
+	bc := u.borderRGBA(u.BorderColour)
 	rowFull := make([]byte, TotalWidth*4)
 	allBorder := func(int) bool { return true }
 	paintStrip := func(rowStart, rowEnd int) {
@@ -2769,3 +2773,34 @@ const (
 	// leaves headroom for the beeper/AY in the saturating mix.
 	tapeAudioAmplitude int16 = 9000
 )
+
+// SetNextULAPalette installs the Next ULA palette lookup. Per the Next
+// palette docs (wiki.specnext.dev/Palettes), in standard ULA mode ink
+// colours use ULA palette entries 0-15 (bright adds 8) and paper and border
+// colours use entries 16-31, programmed through NextReg $40/$41/$44.
+func (u *ULA) SetNextULAPalette(fn func(index byte) (color.RGBA, bool)) {
+	u.nextULAColour = fn
+}
+
+func (u *ULA) inkRGBA(idx byte) color.RGBA {
+	if u.nextULAColour != nil {
+		if c, ok := u.nextULAColour(idx & 0x0F); ok {
+			return c
+		}
+	}
+	return u.palette[idx&0x0F]
+}
+
+func (u *ULA) paperRGBA(idx byte) color.RGBA {
+	if u.nextULAColour != nil {
+		if c, ok := u.nextULAColour(16 + idx&0x0F); ok {
+			return c
+		}
+	}
+	return u.palette[idx&0x0F]
+}
+
+// borderRGBA is the border colour: the non-bright paper entry (16-23).
+func (u *ULA) borderRGBA(colour byte) color.RGBA {
+	return u.paperRGBA(colour & 0x07)
+}

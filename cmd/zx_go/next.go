@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"image/color"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -1322,6 +1323,14 @@ func wireNextSubsystems(e *emulator) error {
 	// the ULA transparency colour for the SUL per-pixel stencil + the
 	// NR$4A fallback (a transparent ULA pixel carries u.palette[NR$14]).
 	comp.SetULAPalette(u.Palette())
+	u.SetNextULAPalette(func(i byte) (color.RGBA, bool) {
+		p := pal.PaletteForLayer(palette.LayerULA)
+		if !p.Written(i) {
+			return color.RGBA{}, false
+		}
+		r, g, b := p.RGB(i)
+		return color.RGBA{R: r, G: g, B: b, A: 255}, true
+	})
 	// Wire the live NR$4C (tilemap transparency nibble) into the
 	// compositor: a tilemap pixel is transparent when its palette
 	// index's low nibble == NR$4C(3:0) (FPGA tilemap.vhd:427). NextZXOS

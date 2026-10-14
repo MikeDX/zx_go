@@ -23,6 +23,7 @@ package palette
 // uint16 (low 9 bits); priority is stored separately so the colour path is
 // unchanged.
 type Palette struct {
+	written  [256]bool
 	entries  [256]uint16
 	priority [256]byte
 }
@@ -34,7 +35,12 @@ func New() *Palette { return &Palette{} }
 // of val are kept.
 func (p *Palette) Set(index byte, val uint16) {
 	p.entries[index] = val & 0x01FF
+	p.written[index] = true
 }
+
+// Written reports whether the guest has stored a value at index since the
+// palette was created.
+func (p *Palette) Written(index byte) bool { return p.written[index] }
 
 // Get returns the 9-bit value at the given index.
 func (p *Palette) Get(index byte) uint16 { return p.entries[index] }
